@@ -187,7 +187,8 @@ final class ModelStore: ObservableObject {
             var chunkDone = false
             for attempt in 1...6 {
                 do {
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    // One direct fetch per chunk: far faster than byte-by-byte AsyncBytes.
+                    let (data, response) = try await URLSession.shared.data(for: request)
                     let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                     guard (200..<300).contains(status) else { throw URLError(.badServerResponse) }
                     if status == 200 && offset > 0 {
@@ -197,23 +198,9 @@ final class ModelStore: ObservableObject {
                         offset = 0
                         throw URLError(.cannotParseResponse)
                     }
-                    // URLSession.AsyncBytes yields individual bytes; batch into 1 MB writes.
-                    var batch: [UInt8] = []
-                    batch.reserveCapacity(1 << 20)
-                    var received: Int64 = 0
-                    for try await byte in bytes {
-                        batch.append(byte)
-                        if batch.count >= (1 << 20) {
-                            try handle.write(contentsOf: Data(batch))
-                            received += Int64(batch.count)
-                            batch.removeAll(keepingCapacity: true)
-                        }
-                    }
-                    if !batch.isEmpty {
-                        try handle.write(contentsOf: Data(batch))
-                        received += Int64(batch.count)
-                    }
+                    try handle.write(contentsOf: data)
                     try handle.synchronize()
+                    let received = Int64(data.count)
                     offset += received
                     let d = await progress.add(received)
                     if d - lastReport > max(total / 200, 1) {
