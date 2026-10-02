@@ -15,6 +15,26 @@ final class ModelStore: ObservableObject {
 
     @Published private(set) var phase: Phase = .checking
 
+    enum DownloadError: LocalizedError {
+        case httpStatus(status: Int, file: String)
+        case apiFailed(status: Int)
+        case underlying(Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .httpStatus(let status, let file):
+                if status == 429 {
+                    return "Hugging Face is rate-limiting downloads right now (HTTP 429) while fetching \(file). Wait a few minutes, then tap Try Again."
+                }
+                return "Download failed: \(file) returned HTTP \(status). Tap Try Again to resume."
+            case .apiFailed(let status):
+                return "Couldn't list the voice files (HTTP \(status)). Check your connection and tap Try Again."
+            case .underlying(let error):
+                return "Download failed: \(error.localizedDescription). Tap Try Again to resume."
+            }
+        }
+    }
+
     static let hfBase = "https://huggingface.co/csukuangfj/kokoro-int8-multi-lang-v1_0/resolve/main/"
     static let hfTreeAPI = "https://huggingface.co/api/models/csukuangfj/kokoro-int8-multi-lang-v1_0/tree/main/espeak-ng-data?recursive=true"
 
@@ -106,11 +126,21 @@ final class ModelStore: ObservableObject {
             Item(remote: "lexicon-us-en.txt", local: "lexicon-us-en.txt", size: 6_366_635),
         ]
 
-        // espeak-ng-data file list (355 small files, ~17.5 MB)
-        let (apiData, apiResponse) = try await URLSession.shared.data(from: URL(string: hfTreeAPI)!)
-        guard (apiResponse as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true else {
-            throw URLError(.badServerResponse)
+        // espeak-ng-data file list (355 small files, ~17.5 MB); retry a few times.
+        var apiData: Data?
+        var apiStatus = 0
+        for _ in 1...3 {
+            do {
+                let (d, r) = try await URLSession.shared.data(from: URL(string: hfTreeAPI)!)
+                apiStatus = (r as? HTTPURLResponse)?.statusCode ?? 0
+                guard (200..<300).contains(apiStatus) else { throw DownloadError.apiFailed(status: apiStatus) }
+                apiData = d
+                break
+            } catch {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
         }
+        guard let apiData else { throw DownloadError.apiFailed(status: apiStatus) }
         let entries = try JSONDecoder().decode([HFEntry].self, from: apiData)
         for e in entries where e.type != "directory" {
             items.append(Item(remote: e.path, local: e.path, size: Int64(e.size ?? 0)))
@@ -128,7 +158,7 @@ final class ModelStore: ObservableObject {
         try await withThrowingTaskGroup(of: Void.self) { group in
             var pending = 0
             for item in rest {
-                if pending >= 6 {
+                if pending >= 4 {
                     try await group.next()
                     pending -= 1
                 }
@@ -143,7 +173,7 @@ final class ModelStore: ObservableObject {
         await report(done, total, "Finishing…")
     }
 
-    private static let chunkSize: Int64 = 4 * 1024 * 1024  // 4 MB chunks
+    private static let chunkSize: Int64 = 8 * 1024 * 1024  // 8 MB chunks
 
     private static func fetch(
         item: Item,
@@ -184,13 +214,17 @@ final class ModelStore: ObservableObject {
 
             // Retry a chunk several times with backoff; a dropout loses at most one chunk.
             var lastError: Error?
+            var lastStatus = 0
             var chunkDone = false
             for attempt in 1...6 {
                 do {
                     // One direct fetch per chunk: far faster than byte-by-byte AsyncBytes.
                     let (data, response) = try await URLSession.shared.data(for: request)
                     let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    guard (200..<300).contains(status) else { throw URLError(.badServerResponse) }
+                    lastStatus = status
+                    guard (200..<300).contains(status) else {
+                        throw DownloadError.httpStatus(status: status, file: item.local)
+                    }
                     if status == 200 && offset > 0 {
                         // Server ignored the Range header; restart the file from scratch.
                         try handle.truncate(atOffset: 0)
@@ -216,13 +250,18 @@ final class ModelStore: ObservableObject {
                     try? handle.truncate(atOffset: UInt64(max(offset, 0)))
                     try? handle.seekToEnd()
                     if attempt < 6 {
-                        let delay = UInt64(1 << min(attempt, 4)) * 1_000_000_000
+                        // Rate-limited: wait out the limiter instead of hammering it.
+                        let delay: UInt64 =
+                            lastStatus == 429 ? 60_000_000_000 : UInt64(1 << min(attempt, 4)) * 1_000_000_000
                         try? await Task.sleep(nanoseconds: delay)
                     }
                 }
             }
             if !chunkDone {
-                throw lastError ?? URLError(.unknown)
+                if lastStatus != 0 {
+                    throw DownloadError.httpStatus(status: lastStatus, file: item.local)
+                }
+                throw DownloadError.underlying(lastError ?? URLError(.unknown))
             }
             if item.size <= 0 { break }
         }
