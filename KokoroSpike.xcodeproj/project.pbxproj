@@ -79,6 +79,7 @@
 				A1B2C3D40000000000000003 /* Frameworks */,
 				A1B2C3D40000000000000004 /* Sources */,
 				A1B2C3D40000000000000005 /* Resources */,
+				A1B2C3D40000000000000040 /* Bundle Kokoro model */,
 			);
 			buildRules = (
 			);
@@ -132,6 +133,24 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A1B2C3D40000000000000040 /* Bundle Kokoro model */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle Kokoro model";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nMODEL_URL=\"https://github.com/a2sandoval/kokoro-tts-ios/releases/download/model-v1/kokoro-model-v1.zip\"\nCACHE_DIR=\"${HOME}/Library/Caches/kokoro-tts-ios\"\nZIP=\"$CACHE_DIR/kokoro-model-v1.zip\"\nDEST=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"$CACHE_DIR\"\nif [ ! -f \"$ZIP\" ]; then\necho \"Downloading Kokoro model bundle (~125 MB)...\"\ncurl -sSL --retry 3 -o \"$ZIP\" \"$MODEL_URL\"\nfi\nif [ ! -f \"$DEST/model.int8.onnx\" ]; then\necho \"Extracting Kokoro model bundle into the app...\"\nunzip -o -q \"$ZIP\" -d \"$DEST\"\nfi";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 
 /* Begin PBXSourcesBuildPhase section */
 		A1B2C3D40000000000000004 /* Sources */ = {

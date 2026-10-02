@@ -14,71 +14,25 @@ struct ContentView: View {
         Group {
             switch store.phase {
             case .checking:
-                ProgressView("Checking voice files…")
-            case .missing, .failed:
-                DownloadView(store: store)
-            case .downloading:
-                DownloadView(store: store)
+                ProgressView("Loading voices…")
             case .ready:
                 ReaderView(engine: engine)
+            case .failed(let message):
+                VStack(spacing: 16) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("Kokoro Voices")
+                        .font(.largeTitle.bold())
+                    Text(message)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
+                }
+                .padding()
             }
         }
         .onAppear { store.check() }
-    }
-}
-
-// MARK: - Download
-
-struct DownloadView: View {
-    @ObservedObject var store: ModelStore
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            Image(systemName: "waveform")
-                .font(.system(size: 64))
-                .foregroundStyle(.tint)
-            Text("Kokoro Voices")
-                .font(.largeTitle.bold())
-            Text("Free, open-source neural voices that run entirely on your iPhone. One download of about 165 MB, then everything works offline. Keep the app open until it finishes — if the connection drops, it picks up where it stopped.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-
-            switch store.phase {
-            case .downloading(let downloaded, let total, let label):
-                VStack(spacing: 8) {
-                    ProgressView(value: Double(downloaded), total: Double(total))
-                    Text("\(label)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("\(formatMB(downloaded)) of \(formatMB(total))")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 32)
-            case .failed(let message):
-                Text(message)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-                Button("Try Again") { store.download() }
-                    .buttonStyle(.borderedProminent)
-            default:
-                Button("Download Voices (165 MB)") { store.download() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-            }
-            Spacer()
-        }
-        .padding()
-    }
-
-    private func formatMB(_ bytes: Int64) -> String {
-        String(format: "%.0f MB", Double(bytes) / 1_000_000)
     }
 }
 
