@@ -164,14 +164,28 @@ final class ModelStore: ObservableObject {
         fm.createFile(atPath: tmp.path, contents: nil)
         let handle = try FileHandle(forWritingTo: tmp)
         defer { try? handle.close() }
-        var lastReport = await progress.add(0)
-        for try await chunk in bytes {
-            try handle.write(contentsOf: chunk)
-            let d = await progress.add(Int64(chunk.count))
-            if d - lastReport > max(total / 200, 1) {
-                lastReport = d
-                await report(d, total, item.local)
+        // URLSession.AsyncBytes yields individual bytes; batch them into 1 MB writes.
+        var batch: [UInt8] = []
+        batch.reserveCapacity(1 << 20)
+        var batchesSinceReport = 0
+        for try await byte in bytes {
+            batch.append(byte)
+            if batch.count >= (1 << 20) {
+                try handle.write(contentsOf: Data(batch))
+                let d = await progress.add(Int64(batch.count))
+                batch.removeAll(keepingCapacity: true)
+                batchesSinceReport += 1
+                if batchesSinceReport >= 4 {
+                    batchesSinceReport = 0
+                    await report(d, total, item.local)
+                }
             }
+        }
+        if !batch.isEmpty {
+            try handle.write(contentsOf: Data(batch))
+            let d = await progress.add(Int64(batch.count))
+            batch.removeAll(keepingCapacity: true)
+            await report(d, total, item.local)
         }
         try? fm.removeItem(at: localURL)
         try fm.moveItem(at: tmp, to: localURL)

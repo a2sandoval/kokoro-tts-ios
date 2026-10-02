@@ -1,11 +1,11 @@
 import Foundation
 
 #if canImport(SherpaOnnx)
-    import SherpaOnnx
+@preconcurrency import SherpaOnnx
 #elseif canImport(SherpaOnnxShared)
-    import SherpaOnnxShared
+@preconcurrency import SherpaOnnxShared
 #else
-    #error("sherpa-onnx module not found. Add the k2-fsa/sherpa-onnx Swift package.")
+#error("sherpa-onnx module not found. Add the k2-fsa/sherpa-onnx Swift package.")
 #endif
 
 /// Wraps sherpa-onnx's Kokoro offline TTS. All blocking inference runs on a
@@ -26,15 +26,13 @@ final class KokoroEngine: ObservableObject {
     @Published var speed: Float = 1.0
 
     private var tts: SherpaOnnxOfflineTtsWrapper?
-    /// Keeps the C config (and its string storage) alive for the wrapper's lifetime.
-    private var ttsConfig: SherpaOnnxOfflineTtsConfig?
     private let player = AudioPlayer()
     private let store: ModelStore
     private let ttsQueue = DispatchQueue(label: "kokoro.tts", qos: .userInitiated)
     private var genState: GenState?
 
     /// Cancellation flag shared with the C progress callback (callback thread only reads).
-    private final class GenState {
+    private final class GenState: @unchecked Sendable {
         private let lock = NSLock()
         private var _cancelled = false
         var cancelled: Bool {
@@ -79,7 +77,6 @@ final class KokoroEngine: ObservableObject {
                 guard let self else { return }
                 if ok {
                     self.tts = wrapper
-                    self.ttsConfig = config
                     self.phase = .ready
                     print("KokoroSpike: engine ready, speakers=\(speakers) rate=\(rate)")
                 } else {
@@ -104,7 +101,7 @@ final class KokoroEngine: ObservableObject {
         let speed = self.speed
         ttsQueue.async { [weak self] in
             guard let self else { return }
-            var genConfig = SherpaOnnxGenerationConfigSwift(silenceScale: 0.2, speed: speed, sid: sid)
+            let genConfig = SherpaOnnxGenerationConfigSwift(silenceScale: 0.2, speed: speed, sid: sid)
             // Non-capturing closure -> C function pointer. Returning 0 aborts generation.
             let callback: TtsProgressCallbackWithArg = { _, _, _, arg in
                 let st = Unmanaged<GenState>.fromOpaque(arg!).takeUnretainedValue()
