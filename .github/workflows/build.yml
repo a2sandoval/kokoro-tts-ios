@@ -1,0 +1,52 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26 if available
+        run: |
+          ls /Applications/ | grep -i xcode || true
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE" ]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project KokoroSpike.xcodeproj \
+            -scheme KokoroSpike \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm-cache"
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild \
+            -project KokoroSpike.xcodeproj \
+            -scheme KokoroSpike \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm-cache" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/KokoroSpike.app"
+          ls -la "$APP_PATH"
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry KokoroSpike-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: KokoroSpike-unsigned-ipa
+          path: KokoroSpike-unsigned.ipa
