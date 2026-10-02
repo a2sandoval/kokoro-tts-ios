@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Downloads the Kokoro model files from Hugging Face on first launch.
 /// Model: csukuangfj/kokoro-int8-multi-lang-v1_0 (int8, ~166 MB total).
@@ -43,6 +44,8 @@ final class ModelStore: ObservableObject {
     }
 
     func download() {
+        // Keep the screen awake: iOS suspends ordinary downloads when the app backgrounds.
+        UIApplication.shared.isIdleTimerDisabled = true
         phase = .downloading(downloaded: 0, total: 1, label: "Starting…")
         Task.detached { [weak self] in
             do {
@@ -52,11 +55,13 @@ final class ModelStore: ObservableObject {
                     }
                 }
                 await MainActor.run { [weak self] in
+                    UIApplication.shared.isIdleTimerDisabled = false
                     guard let self else { return }
                     self.phase = self.isReady ? .ready : .failed("Download finished but files are missing.")
                 }
             } catch {
                 await MainActor.run { [weak self] in
+                    UIApplication.shared.isIdleTimerDisabled = false
                     self?.phase = .failed(error.localizedDescription)
                 }
             }
@@ -138,6 +143,8 @@ final class ModelStore: ObservableObject {
         await report(done, total, "Finishing…")
     }
 
+    private static let chunkSize: Int64 = 4 * 1024 * 1024  // 4 MB chunks
+
     private static func fetch(
         item: Item,
         dir: URL,
@@ -147,48 +154,91 @@ final class ModelStore: ObservableObject {
     ) async throws {
         let fm = FileManager.default
         let localURL = dir.appendingPathComponent(item.local)
-        if fm.fileExists(atPath: localURL.path) {
-            let existing = (try? fm.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
-            let d = await progress.add(existing)
-            await report(d, total, item.local)
-            return
-        }
         let url = URL(string: hfBase + item.remote)!
-        let (bytes, response) = try await URLSession.shared.bytes(from: url)
-        guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) == true else {
-            throw URLError(.badServerResponse)
+
+        // Resume: pick up where a previous attempt left off.
+        var offset: Int64 = 0
+        if fm.fileExists(atPath: localURL.path) {
+            offset = (try? fm.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
+            if item.size > 0 && offset >= item.size {
+                let d = await progress.add(offset)
+                await report(d, total, item.local)
+                return
+            }
+        } else {
+            try fm.createDirectory(
+                at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            fm.createFile(atPath: localURL.path, contents: nil)
         }
-        try fm.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let tmp = localURL.appendingPathExtension("part")
-        try? fm.removeItem(at: tmp)
-        fm.createFile(atPath: tmp.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: tmp)
+
+        let handle = try FileHandle(forWritingTo: localURL)
         defer { try? handle.close() }
-        // URLSession.AsyncBytes yields individual bytes; batch them into 1 MB writes.
-        var batch: [UInt8] = []
-        batch.reserveCapacity(1 << 20)
-        var batchesSinceReport = 0
-        for try await byte in bytes {
-            batch.append(byte)
-            if batch.count >= (1 << 20) {
-                try handle.write(contentsOf: Data(batch))
-                let d = await progress.add(Int64(batch.count))
-                batch.removeAll(keepingCapacity: true)
-                batchesSinceReport += 1
-                if batchesSinceReport >= 4 {
-                    batchesSinceReport = 0
-                    await report(d, total, item.local)
+        try handle.seekToEnd()
+
+        var lastReport = await progress.add(0)
+        while item.size <= 0 || offset < item.size {
+            let end: Int64 =
+                item.size > 0 ? min(offset + chunkSize - 1, item.size - 1) : offset + chunkSize - 1
+            var request = URLRequest(url: url)
+            request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
+
+            // Retry a chunk several times with backoff; a dropout loses at most one chunk.
+            var lastError: Error?
+            var chunkDone = false
+            for attempt in 1...6 {
+                do {
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    guard (200..<300).contains(status) else { throw URLError(.badServerResponse) }
+                    if status == 200 && offset > 0 {
+                        // Server ignored the Range header; restart the file from scratch.
+                        try handle.truncate(atOffset: 0)
+                        try handle.seek(toOffset: 0)
+                        offset = 0
+                        throw URLError(.cannotParseResponse)
+                    }
+                    // URLSession.AsyncBytes yields individual bytes; batch into 1 MB writes.
+                    var batch: [UInt8] = []
+                    batch.reserveCapacity(1 << 20)
+                    var received: Int64 = 0
+                    for try await byte in bytes {
+                        batch.append(byte)
+                        if batch.count >= (1 << 20) {
+                            try handle.write(contentsOf: Data(batch))
+                            received += Int64(batch.count)
+                            batch.removeAll(keepingCapacity: true)
+                        }
+                    }
+                    if !batch.isEmpty {
+                        try handle.write(contentsOf: Data(batch))
+                        received += Int64(batch.count)
+                    }
+                    try handle.synchronize()
+                    offset += received
+                    let d = await progress.add(received)
+                    if d - lastReport > max(total / 200, 1) {
+                        lastReport = d
+                        await report(d, total, item.local)
+                    }
+                    chunkDone = true
+                    lastError = nil
+                    break
+                } catch {
+                    lastError = error
+                    // Roll the file back to the last fully-downloaded chunk before retrying.
+                    try? handle.truncate(atOffset: UInt64(max(offset, 0)))
+                    try? handle.seekToEnd()
+                    if attempt < 6 {
+                        let delay = UInt64(1 << min(attempt, 4)) * 1_000_000_000
+                        try? await Task.sleep(nanoseconds: delay)
+                    }
                 }
             }
+            if !chunkDone {
+                throw lastError ?? URLError(.unknown)
+            }
+            if item.size <= 0 { break }
         }
-        if !batch.isEmpty {
-            try handle.write(contentsOf: Data(batch))
-            let d = await progress.add(Int64(batch.count))
-            batch.removeAll(keepingCapacity: true)
-            await report(d, total, item.local)
-        }
-        try? fm.removeItem(at: localURL)
-        try fm.moveItem(at: tmp, to: localURL)
         let d = await progress.add(0)
         await report(d, total, item.local)
     }

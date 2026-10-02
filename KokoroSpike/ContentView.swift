@@ -40,7 +40,7 @@ struct DownloadView: View {
                 .foregroundStyle(.tint)
             Text("Kokoro Voices")
                 .font(.largeTitle.bold())
-            Text("Free, open-source neural voices that run entirely on your iPhone. One download of about 165 MB, then everything works offline.")
+            Text("Free, open-source neural voices that run entirely on your iPhone. One download of about 165 MB, then everything works offline. Keep the app open until it finishes — if the connection drops, it picks up where it stopped.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal)
